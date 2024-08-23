@@ -24,7 +24,7 @@
 #include <utility/imumaths.h>
 #include <nav_msgs/msg/odometry.h>
 #include <std_msgs/msg/string.h>
-
+#include <builtin_interfaces/msg/time.h>
 
 
 // Include the local header files
@@ -50,6 +50,11 @@ sensor_msgs__msg__Imu imu_msg;
 // Declare the esp32 LED subscriber
 rcl_subscription_t led_subscriber;          
 std_msgs__msg__String led_msg;
+
+// Declare the clock subscriber used to receive system clock sync from ROS2 host PC
+rcl_subscription_t clock_subscriber;
+builtin_interfaces__msg__Time clock_msg;
+builtin_interfaces__msg__Time current_ros_time;
 
 // Declare the ROS & micro-ROS node interfaces
 rclc_support_t support;
@@ -105,48 +110,7 @@ void cmdVelCallback(const void *msg_in) {
     target_linear_velocity = msg->linear.x;
     target_angular_velocity = msg->angular.z;
 
-    // Code from Void Loop()
-    float dt = 1.0 / CONTROL_LOOP_HZ;
-
-    // Stop motors if both target velocities are zero
-    if (target_linear_velocity == 0 && target_angular_velocity == 0) {
-        stopMotors();
-    } else {
-        // Update encoders
-        front_left_encoder.update();
-        front_right_encoder.update();
-        back_left_encoder.update();
-        back_right_encoder.update();
-
-        // Calculate wheel velocities
-        float fl_velocity = front_left_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
-        float fr_velocity = front_right_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
-        float bl_velocity = back_left_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
-        float br_velocity = back_right_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
-
-        // Update odometry
-        odometry.update(fl_velocity, fr_velocity, bl_velocity, br_velocity, dt);
-        // Get the odometry message
-        nav_msgs__msg__Odometry odom_msg = odometry.getOdometryMsg();
-
-        // Publish the Odometry message
-        rcl_ret_t ret_odom_ok = rcl_publish(&odom_publisher, &odom_msg, NULL);
-
-        // Calculate PID outputs
-        WheelSpeeds target_speeds = kinematics.inverseKinematics(target_linear_velocity, target_angular_velocity);
-        float fl_output = pid_front_left.calculate(target_speeds.front_left, fl_velocity, dt);
-        float fr_output = pid_front_right.calculate(target_speeds.front_right, fr_velocity, dt);
-        float bl_output = pid_back_left.calculate(target_speeds.back_left, bl_velocity, dt);
-        float br_output = pid_back_right.calculate(target_speeds.back_right, br_velocity, dt);
-
-        // Drive motors using PWM and direction control
-        setMotor(0, 4, fl_output);  // Front Left Motor
-        setMotor(1, 5, fr_output);  // Front Right Motor
-        setMotor(2, 6, bl_output);  // Back Left Motor
-        setMotor(3, 7, br_output);  // Back Right Motor
-    }
-
-    delay(1000 / CONTROL_LOOP_HZ);
+    
 
 }
 
@@ -167,6 +131,12 @@ void led_callback(const void *msgin) {
     else {
         digitalWrite(ESP32_LED, LOW);
     }
+}
+
+void clock_callback(const void * msgin) {
+    const builtin_interfaces__msg__Time * msg = (const builtin_interfaces__msg__Time *)msgin;
+    current_ros_time.sec = msg->sec;
+    current_ros_time.nanosec = msg->nanosec;
 }
 
 
@@ -267,16 +237,24 @@ void setup() {
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, String),
         "esp_led");
 
-
+    // Create clock subscriber
+    rclc_subscription_init_default(
+        &clock_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(builtin_interfaces, msg, Time),
+        "/clock");
+    
     // ---------------------  NEW GPT CODE -------------------------------
     // executor = rclc_executor_get_zero_initialized_executor();
     // ---------------------- END NEW GPT CODE ---------------------------
 
     // Create executor which only handles timer and subscriber callbacks
-    rclc_executor_init(&executor, &support.context, 3, &allocator);  // adjust the number of handles for each callback added
+    rclc_executor_init(&executor, &support.context, 4, &allocator);  // adjust the number of handles for each callback added
     rclc_executor_add_timer(&executor, &timer);
     rclc_executor_add_subscription(&executor, &cmd_vel_subscriber, &cmd_vel_msg, &cmdVelCallback, ON_NEW_DATA);
     rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_callback, ON_NEW_DATA);
+    rclc_executor_add_subscription(&executor, &clock_subscriber, &clock_msg, &clock_callback, ON_NEW_DATA);
+
 
     // Initialize esp_led_subscriber message memory.
     char string_memory[STRING_LEN];
@@ -294,7 +272,50 @@ void setup() {
 }
 
 void loop() {
+
+    // control loop = 50hz 
+    float dt = 1.0 / CONTROL_LOOP_HZ;
+
     // Spin the ROS 2 executor to handle callbacks
     rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
-    delay(20);
+    
+    // Stop motors if both target velocities are zero
+    if (target_linear_velocity == 0 && target_angular_velocity == 0) {
+        stopMotors();
+    } 
+
+    // Update encoders
+    front_left_encoder.update();
+    front_right_encoder.update();
+    back_left_encoder.update();
+    back_right_encoder.update();
+
+    // Calculate wheel velocities
+    float fl_velocity = front_left_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
+    float fr_velocity = front_right_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
+    float bl_velocity = back_left_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
+    float br_velocity = back_right_encoder.getWheelVelocity(WHEEL_RADIUS, dt);
+
+    // Update odometry
+    odometry.update(fl_velocity, fr_velocity, bl_velocity, br_velocity, dt, current_ros_time);
+    // Get the odometry message
+    nav_msgs__msg__Odometry odom_msg = odometry.getOdometryMsg();
+
+    // Publish the Odometry message
+    rcl_ret_t ret_odom_ok = rcl_publish(&odom_publisher, &odom_msg, NULL);
+
+    // Calculate PID outputs
+    WheelSpeeds target_speeds = kinematics.inverseKinematics(target_linear_velocity, target_angular_velocity);
+    float fl_output = pid_front_left.calculate(target_speeds.front_left, fl_velocity, dt);
+    float fr_output = pid_front_right.calculate(target_speeds.front_right, fr_velocity, dt);
+    float bl_output = pid_back_left.calculate(target_speeds.back_left, bl_velocity, dt);
+    float br_output = pid_back_right.calculate(target_speeds.back_right, br_velocity, dt);
+
+    // Drive motors using PWM and direction control
+    setMotor(0, 4, fl_output);  // Front Left Motor
+    setMotor(1, 5, fr_output);  // Front Right Motor
+    setMotor(2, 6, bl_output);  // Back Left Motor
+    setMotor(3, 7, br_output);  // Back Right Motor
+
+    delay(1000 / CONTROL_LOOP_HZ);
 }

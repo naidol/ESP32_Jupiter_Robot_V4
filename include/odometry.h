@@ -3,6 +3,7 @@
 
 #include "kinematics.h"
 #include <nav_msgs/msg/odometry.h>
+#include <builtin_interfaces/msg/time.h>
 
 class Odometry {
 public:
@@ -10,7 +11,9 @@ public:
     Odometry(float wheel_radius, float wheel_base_width);
 
     // Update function that calculates the robot's position and orientation
-    void update(float front_left_velocity, float front_right_velocity, float back_left_velocity, float back_right_velocity, float dt);
+    void update(float front_left_velocity, float front_right_velocity, 
+                float back_left_velocity, float back_right_velocity, 
+                float dt, builtin_interfaces__msg__Time current_ros_time);
 
     // Function to get the current pose
     void getPose(float &x_out, float &y_out, float &theta_out);
